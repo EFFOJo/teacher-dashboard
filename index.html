@@ -73,15 +73,19 @@
   .badge { padding: 2px 8px; border-radius: 4px; }
   .badge-pos { background-color: #e8f5e9; color: var(--success-color); }
   .badge-neg { background-color: #ffebee; color: var(--danger-color); }
-  .badge-attendance { background-color: #fffbeb; color: var(--warning-color); }
+  .badge-late { background-color: #fffbeb; color: var(--warning-color); }
   
   .profile-card { background: #ffffff; border: 1px solid var(--border-color); border-radius: 12px; width: 100%; max-width: 620px; padding: 30px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.02); }
   .profile-header { border-bottom: 1px solid var(--border-color); padding-bottom: 15px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: flex-start; }
   .profile-header h2 { color: var(--primary-color); font-size: 22px; }
   
-  .attendance-card { background-color: #fffbeb; border: 1px solid #fef3c7; border-radius: 8px; padding: 15px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; }
-  .attendance-controls { display: flex; gap: 8px; }
-  
+  .timer-card { background-color: #fffbeb; border: 1px solid #fef3c7; border-radius: 8px; padding: 15px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; }
+  .timer-display { font-family: monospace; font-size: 24px; font-weight: bold; color: #b45309; }
+  .timer-controls { display: flex; gap: 8px; }
+  .timer-btn { padding: 6px 12px; font-size: 12px; font-weight: 600; border-radius: 6px; border: none; cursor: pointer; }
+  .timer-start { background-color: var(--warning-color); color: white; }
+  .timer-stop { background-color: var(--success-color); color: white; }
+
   .behavior-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
   .behavior-box { border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; text-align: center; }
   .counter-val { font-size: 28px; font-weight: 700; margin-top: 5px; }
@@ -144,7 +148,7 @@
   <div class="dashboard-container">
     <sidebar>
       <div>
-        <h3 class="section-title">MANAGEMENT</h3>
+        <h3 class="section-title">Management Tools</h3>
         <input id="searchTeachers" placeholder="Search teachers..." oninput="renderTeachersList()">
         <div class="input-group">
           <input id="teacherName" placeholder="Enter teacher name...">
@@ -152,7 +156,6 @@
         </div>
       </div>
       <div>
-        <button class="btn btn-outline" onclick="exportDataToExcel()">⬇ Export to Excel</button>
         <button class="btn btn-outline" onclick="exportDataToJSON()">⬇ Backup JSON</button>
         <button class="btn btn-outline" onclick="document.getElementById('importFileInput').click()">⬆ Import JSON</button>
         <input type="file" id="importFileInput" class="hidden" accept=".json" onchange="importDataFromJSON(event)">
@@ -161,13 +164,13 @@
 
     <div class="list-panel">
       <h3 class="section-title">Teachers</h3>
-      <div id="teachersList">Loading...</div>
+      <div id="teachersList"></div>
     </div>
 
     <div class="main-content" id="focusArea">
       <div class="empty-state">
         <div class="empty-state-icon">👤</div>
-        <p>Select a teacher from the list to track metrics and running attendance parameters</p>
+        <p>Select a teacher from the list to track metrics and running late parameters</p>
       </div>
     </div>
   </div>
@@ -176,7 +179,7 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-import { getFirestore, collection, doc, addDoc, onSnapshot, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+import { getFirestore, collection, doc, addDoc, onSnapshot, updateDoc, deleteDoc, query, where } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBox4mE3gkzXhwlotSdUT4JZl2zHCuOY2c",
@@ -193,20 +196,30 @@ const db = getFirestore(app);
 
 let teachers = [];
 let selectedTeacherId = null;
+let currentUserId = null;
+let currentUserEmail = "";
+
+let activeInterval = null;
+let currentSecondsElapsed = 0;
 
 const defaultPositiveBehaviors = ["Excellent Explanation", "Helping Students", "Organized Lesson"];
 const defaultNegativeBehaviors = ["Getting mad and looking for problems", "Shouting at students", "Loving Elias"];
 
 onAuthStateChanged(auth, (user) => {
   if (user) {
+    currentUserId = user.uid;
+    currentUserEmail = user.email;
     document.getElementById("authView").classList.add("hidden");
     document.getElementById("appView").classList.remove("hidden");
     document.getElementById("currentUser").textContent = user.email;
     document.getElementById("userAvatar").textContent = user.email.substring(0,2).toUpperCase();
     listenToTeachersData();
   } else {
+    currentUserId = null;
+    currentUserEmail = "";
     document.getElementById("authView").classList.remove("hidden");
     document.getElementById("appView").classList.add("hidden");
+    resetLocalTimerState();
   }
 });
 
@@ -219,30 +232,32 @@ window.register = async function() {
 window.login = async function() {
   const email = document.getElementById("loginUser").value.trim();
   const pass = document.getElementById("loginPass").value;
-  try { 
-    await signInWithEmailAndPassword(auth, email, pass); 
-  } catch(err) { 
-    alert("Login Error: " + err.message); 
-  }
+  try { await signInWithEmailAndPassword(auth, email, pass); } catch(err) { alert("Login Error: " + err.message); }
 }
 
-window.logout = function() { signOut(auth); }
+window.logout = function() { resetLocalTimerState(); signOut(auth); }
 window.toggleAuth = function(showRegister) {
   document.getElementById('registerForm').classList.toggle('hidden', !showRegister);
   document.getElementById('loginForm').classList.toggle('hidden', showRegister);
 }
 
 function listenToTeachersData() {
-  onSnapshot(collection(db, "teachers"), (snapshot) => {
+  if (!currentUserId) return;
+  // Privacy isolation constraint added
+  const userSpecificQuery = query(collection(db, "teachers"), where("userId", "==", currentUserId));
+  
+  onSnapshot(userSpecificQuery, (snapshot) => {
     teachers = [];
     snapshot.forEach(doc => { teachers.push({ id: doc.id, ...doc.data() }); });
     renderTeachersList();
     if(selectedTeacherId) {
       const idx = teachers.findIndex(t => t.id === selectedTeacherId);
-      if(idx !== -1) viewTeacher(idx);
+      if(idx !== -1) {
+        updateFocusCardsUI(idx);
+      } else {
+        resetLocalTimerState();
+      }
     }
-  }, (error) => {
-    document.getElementById("teachersList").innerHTML = `<p style="color:red; font-size:12px;">Database Error: Please check your Firestore Rules.</p>`;
   });
 }
 
@@ -255,47 +270,42 @@ window.addTeacher = async function() {
 
   try {
     await addDoc(collection(db, "teachers"), {
-      name: name, positive: 0, negative: 0, attendance: "Present", posBreakdown: initialPos, negBreakdown: initialNeg
+      name: name, 
+      userId: currentUserId,
+      positive: 0, 
+      negative: 0, 
+      minutesLate: 0, 
+      posBreakdown: initialPos, 
+      negBreakdown: initialNeg
     });
     document.getElementById("teacherName").value = "";
+    
+    // Auto trigger verification thank you confirmation message
+    sendThankYouEmail(name);
   } catch(e) { alert("Data Error: " + e.message); }
 }
 
+function sendThankYouEmail(teacherName) {
+  const subject = encodeURIComponent("Teacher Track Node Initialized Successfully");
+  const body = encodeURIComponent(`Hello,\n\nThis confirmation verifies that a new track profile for "${teacherName}" has been successfully added to your private profile registry.\n\nThank you for using the Teachers Dashboard.\n\nBest regards,\nPlatform Administration Panel`);
+  window.location.href = `mailto:${currentUserEmail}?subject=${subject}&body=${body}`;
+}
+
 window.removeTeacher = async function(id) {
-  if(!confirm("Are you sure you want to completely delete this teacher record?")) return;
+  if(!confirm("Are you sure you want to completely delete this teacher from the platform?")) return;
   try {
+    resetLocalTimerState();
     await deleteDoc(doc(db, "teachers", id));
     document.getElementById("focusArea").innerHTML = `<div class="empty-state"><div class="empty-state-icon">👤</div><p>Teacher profile deleted successfully.</p></div>`;
     selectedTeacherId = null;
   } catch(e) { alert("Delete error: " + e.message); }
 }
 
-window.updateAttendance = async function(status) {
-  if(!selectedTeacherId) return;
-  try {
-    await updateDoc(doc(db, "teachers", selectedTeacherId), { attendance: status });
-  } catch(e) { alert("Error updating status: " + e.message); }
-}
-
-window.exportDataToExcel = function() {
-  if(teachers.length === 0) return alert("No data found to export!");
-  let csvContent = "data:text/csv;charset=utf-8,Teacher Name,Status,Positive Score,Negative Score\n";
-  teachers.forEach(t => {
-    csvContent += `"${t.name}","${t.attendance || 'Present'}",${t.positive || 0},${t.negative || 0}\n`;
-  });
-  const encodedUri = encodeURI(csvContent);
-  const link = document.createElement("a");
-  link.setAttribute("href", encodedUri);
-  link.setAttribute("download", "teacher_report.csv");
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-}
-
 window.exportDataToJSON = function() {
   if(teachers.length === 0) return alert("No teacher data found to back up!");
   const exportPayload = teachers.map(({ id, ...data }) => data);
   const jsonString = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(exportPayload, null, 2));
+  
   const downloadAnchor = document.createElement('a');
   downloadAnchor.setAttribute("href", jsonString);
   downloadAnchor.setAttribute("download", `teachers_backup_${new Date().toISOString().slice(0,10)}.json`);
@@ -307,25 +317,80 @@ window.exportDataToJSON = function() {
 window.importDataFromJSON = function(event) {
   const file = event.target.files[0];
   if (!file) return;
+
   const reader = new FileReader();
   reader.onload = async function(e) {
     try {
       const parsedData = JSON.parse(e.target.result);
-      if (!Array.isArray(parsedData)) throw new Error("JSON invalid format.");
+      if (!Array.isArray(parsedData)) throw new Error("JSON sequence configuration mismatch.");
+
+      if(!confirm(`Proceed to inject ${parsedData.length} teacher metrics records into your live Firestore collection?`)) return;
+
       for (const t of parsedData) {
         await addDoc(collection(db, "teachers"), {
           name: t.name || "Unknown Teacher",
+          userId: currentUserId,
           positive: t.positive || 0,
           negative: t.negative || 0,
-          attendance: t.attendance || "Present",
+          minutesLate: t.minutesLate || 0,
           posBreakdown: t.posBreakdown || {},
           negBreakdown: t.negBreakdown || {}
         });
       }
-      alert("Import complete!");
-    } catch(err) { alert("Failed to read JSON: " + err.message); }
+      alert("All records parsed and written successfully!");
+      event.target.value = "";
+    } catch(err) {
+      alert("Failed to read JSON backup correctly: " + err.message);
+    }
   };
   reader.readAsText(file);
+}
+
+window.startLateTimer = function() {
+  if(activeInterval) return;
+  document.getElementById("timerBtnStart").classList.add("hidden");
+  document.getElementById("timerBtnStop").classList.remove("hidden");
+  
+  activeInterval = setInterval(() => {
+    currentSecondsElapsed++;
+    const minutes = Math.floor(currentSecondsElapsed / 60);
+    const seconds = currentSecondsElapsed % 60;
+    const timeString = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    
+    const liveClockEl = document.getElementById("liveClock");
+    if(liveClockEl) {
+      liveClockEl.textContent = timeString;
+    }
+  }, 1000);
+}
+
+window.stopLateTimer = async function() {
+  if(!activeInterval) return;
+  clearInterval(activeInterval);
+  activeInterval = null;
+
+  const totalMinutesCalculated = Math.round(currentSecondsElapsed / 60) || 1;
+  const teacher = teachers.find(t => t.id === selectedTeacherId);
+  
+  if(teacher) {
+    const currentLateRecord = teacher.minutesLate || 0;
+    await updateDoc(doc(db, "teachers", selectedTeacherId), { minutesLate: currentLateRecord + totalMinutesCalculated });
+    alert(`Logged ${totalMinutesCalculated} additional minute(s) late for ${teacher.name}`);
+  }
+  
+  currentSecondsElapsed = 0;
+  const btnStart = document.getElementById("timerBtnStart");
+  const btnStop = document.getElementById("timerBtnStop");
+  const clockText = document.getElementById("liveClock");
+  
+  if(btnStart) btnStart.classList.remove("hidden");
+  if(btnStop) btnStop.classList.add("hidden");
+  if(clockText) clockText.textContent = "00:00";
+}
+
+function resetLocalTimerState() {
+  if(activeInterval) { clearInterval(activeInterval); activeInterval = null; }
+  currentSecondsElapsed = 0;
 }
 
 window.adjustPosBehavior = async function(key, amount) {
@@ -355,13 +420,11 @@ window.clearAndAddCustomBehavior = async function(type) {
   if(!teacher) return;
   if(type === 'pos') {
     const input = document.getElementById("newPosName"); const val = input.value.trim(); if(!val) return;
-    if(!teacher.posBreakdown) teacher.posBreakdown = {};
     teacher.posBreakdown[val] = 0;
     await updateDoc(doc(db, "teachers", selectedTeacherId), { posBreakdown: teacher.posBreakdown });
     input.value = "";
   } else {
     const input = document.getElementById("newNegName"); const val = input.value.trim(); if(!val) return;
-    if(!teacher.negBreakdown) teacher.negBreakdown = {};
     teacher.negBreakdown[val] = 0;
     await updateDoc(doc(db, "teachers", selectedTeacherId), { negBreakdown: teacher.negBreakdown });
     input.value = "";
@@ -370,9 +433,16 @@ window.clearAndAddCustomBehavior = async function(type) {
 
 window.viewTeacher = function(index) {
   const t = teachers[index];
+  if(selectedTeacherId !== t.id) { resetLocalTimerState(); }
   selectedTeacherId = t.id;
+  updateFocusCardsUI(index);
+}
+
+function updateFocusCardsUI(index) {
+  const t = teachers[index];
+  if (!t) return;
   
-  document.querySelectorAll('.teacher-item').forEach((el, idx) => {
+  document.querySelectorAll('.teacher-item').forEach((el) => {
     el.classList.toggle('active', el.getAttribute('data-id') === t.id);
   });
 
@@ -386,40 +456,45 @@ window.viewTeacher = function(index) {
     negListHTML += `<div class="breakdown-item"><span>${key}:</span><div class="breakdown-actions"><strong style="margin-right:6px;">${t.negBreakdown[key]}</strong><button class="mini-btn minus" onclick="adjustNegBehavior('${key}', -1)">&minus;</button><button class="mini-btn plus" onclick="adjustNegBehavior('${key}', 1)">&plus;</button></div></div>`;
   }
 
-  const attendanceStatus = t.attendance || "Present";
+  // Preserve clock layout status across real-time rendering changes
+  const computedMinutes = Math.floor(currentSecondsElapsed / 60).toString().padStart(2, '0');
+  const computedSeconds = (currentSecondsElapsed % 60).toString().padStart(2, '0');
+  const clockTextVal = activeInterval ? `${computedMinutes}:${computedSeconds}` : "00:00";
 
   document.getElementById("focusArea").innerHTML = `
     <div class="profile-card">
       <div class="profile-header">
         <div>
           <h2>${t.name}</h2>
-          <p style="color:var(--text-muted); font-size:13px; margin-top:4px;">Teacher Metrics Overview</p>
+          <p style="color:var(--text-muted); font-size:13px; margin-top:4px;">Core Behavior Tracking & Sync Center</p>
         </div>
         <button class="btn btn-action btn-danger" style="padding: 6px 12px; font-size:12px;" onclick="removeTeacher('${t.id}')">Delete Teacher</button>
       </div>
 
-      <div class="attendance-card">
+      <div class="timer-card">
         <div>
-          <div style="font-weight: 700; font-size:13px; color:#92400e;">Status Check</div>
-          <div style="font-size:11px; color:#b45309;">Current status: <strong>${attendanceStatus}</strong></div>
+          <div style="font-weight: 700; font-size:13px; color:#92400e;">Late Tracking Stopwatch</div>
+          <div style="font-size:11px; color:#b45309;">Start timer if the teacher isn't inside class yet.</div>
         </div>
-        <div class="attendance-controls">
-          <button class="mini-btn plus" style="padding:6px 12px;" onclick="updateAttendance('Present')">Present</button>
-          <button class="mini-btn minus" style="padding:6px 12px;" onclick="updateAttendance('Absent')">Absent</button>
-          <button class="mini-btn" style="padding:6px 12px; background:#f59e0b; color:white;" onclick="updateAttendance('Late')">Late</button>
+        <div style="display:flex; align-items:center; gap:15px;">
+          <div class="timer-display" id="liveClock">${clockTextVal}</div>
+          <div class="timer-controls">
+            <button id="timerBtnStart" class="timer-btn timer-start ${activeInterval ? 'hidden' : ''}" onclick="startLateTimer()">▶ Start Timer</button>
+            <button id="timerBtnStop" class="timer-btn timer-stop ${activeInterval ? '' : 'hidden'}" onclick="stopLateTimer()">✔ Arrived</button>
+          </div>
         </div>
       </div>
       
       <div class="behavior-grid">
-        <div class="behavior-box" style="border-top: 4px solid var(--success-color);"><div style="color: var(--success-color); font-weight:600; font-size:13px;">Positive</div><div class="counter-val" style="color: var(--success-color);">${t.positive || 0}</div><div class="breakdown-list">${posListHTML}</div></div>
-        <div class="behavior-box" style="border-top: 4px solid var(--danger-color);"><div style="color: var(--danger-color); font-weight:600; font-size:13px;">Negative</div><div class="counter-val" style="color: var(--danger-color);">${t.negative || 0}</div><div class="breakdown-list">${negListHTML}</div></div>
+        <div class="behavior-box" style="border-top: 4px solid var(--success-color);"><div style="color: var(--success-color); font-weight:600; font-size:13px;">Positive Behaviours</div><div class="counter-val" style="color: var(--success-color);">${t.positive || 0}</div><div class="breakdown-list">${posListHTML}</div></div>
+        <div class="behavior-box" style="border-top: 4px solid var(--danger-color);"><div style="color: var(--danger-color); font-weight:600; font-size:13px;">Negative Behaviours</div><div class="counter-val" style="color: var(--danger-color);">${t.negative || 0}</div><div class="breakdown-list">${negListHTML}</div></div>
       </div>
       
       <div class="action-zone">
-        <h4>Add Custom Metric Options</h4>
+        <h4>Manage Metrics Configurations</h4>
         <div class="action-container">
-          <div class="action-row"><input id="newPosName" placeholder="New positive metric description..."><button class="btn btn-action btn-inc-pos" onclick="clearAndAddCustomBehavior('pos')">Add Option</button></div>
-          <div class="action-row" style="border-top: 1px dashed var(--border-color); padding-top: 12px;"><input id="newNegName" placeholder="New negative metric description..."><button class="btn btn-action btn-inc-neg" onclick="clearAndAddCustomBehavior('neg')">Add Option</button></div>
+          <div class="action-row"><input id="newPosName" placeholder="Create new positive item option..."><button class="btn btn-action btn-inc-pos" onclick="clearAndAddCustomBehavior('pos')">Add Option</button></div>
+          <div class="action-row" style="border-top: 1px dashed var(--border-color); padding-top: 12px;"><input id="newNegName" placeholder="Create new negative item option..."><button class="btn btn-action btn-inc-neg" onclick="clearAndAddCustomBehavior('neg')">Add Option</button></div>
         </div>
       </div>
     </div>`;
@@ -427,12 +502,12 @@ window.viewTeacher = function(index) {
 
 function renderTeachersList(){
   const container = document.getElementById("teachersList"); container.innerHTML = "";
-  const query = document.getElementById("searchTeachers").value.toLowerCase().trim();
+  const queryText = document.getElementById("searchTeachers") ? document.getElementById("searchTeachers").value.toLowerCase().trim() : "";
   
-  const filtered = teachers.filter(t => t.name.toLowerCase().includes(query));
+  const filtered = teachers.filter(t => t.name.toLowerCase().includes(queryText));
 
   if(filtered.length === 0) {
-    container.innerHTML = `<p style="color: var(--text-muted); font-size: 13px; text-align: center; margin-top: 20px;">No matching teacher profiles found.</p>`;
+    container.innerHTML = `<p style="color: var(--text-muted); font-size: 13px; text-align: center; margin-top: 20px;">No records synced yet.</p>`;
     return;
   }
   filtered.forEach((t)=>{
@@ -446,7 +521,7 @@ function renderTeachersList(){
       <div class="behavior-badges">
         <span class="badge badge-pos">Pos: ${t.positive || 0}</span>
         <span class="badge badge-neg">Neg: ${t.negative || 0}</span>
-        <span class="badge badge-attendance">${t.attendance || 'Present'}</span>
+        <span class="badge badge-late">Late: ${t.minutesLate || 0}m</span>
       </div>`;
     container.appendChild(div);
   });
