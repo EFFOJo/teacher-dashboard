@@ -220,7 +220,12 @@ window.register = async function() {
 window.login = async function() {
   const email = document.getElementById("loginUser").value.trim();
   const pass = document.getElementById("loginPass").value;
-  try { await signInWithEmailAndPassword(auth, auth, email, pass); } catch(err) { alert("Login Error: " + err.message); }
+  try { 
+    //  FIXED: Only one 'auth' here
+    await signInWithEmailAndPassword(auth, email, pass); 
+  } catch(err) { 
+    alert("Login Error: " + err.message); 
+  }
 }
 
 window.logout = function() { signOut(auth); }
